@@ -1,0 +1,71 @@
+{
+    "bugs": "https://github.com/gingerbeardman/Tmux-Session/issues",
+    "description": "Share a tmux session between Nova's terminal and an external terminal",
+    "funding": "https://ko-fi.com/gingerbeardman",
+    "homepage": "https://www.gingerbeardman.com",
+    "identifier": "com.gingerbeardman.TmuxSession",
+    "license": "MIT",
+    "name": "Tmux Session",
+    "organization": "gingerbeardman",
+    "repository": "https://github.com/gingerbeardman/Tmux-Session",
+    "version": "1.0.0",
+
+    "categories": ["commands"],
+
+    "main": "main.js",
+
+    "entitlements": {
+        "process": true,
+        "filesystem": "readonly",
+        "clipboard": true
+    },
+
+    "commands": {
+        "extensions": [
+            {
+                "title": "Open in External Terminal",
+                "command": "tmux.openExternal"
+            },
+            {
+                "title": "Copy Join Command",
+                "command": "tmux.copyAttachCommand"
+            },
+            {
+                "title": "Show All Sessions…",
+                "command": "tmux.sessions"
+            },
+            {
+                "title": "Rename Session…",
+                "command": "tmux.renameSession"
+            },
+            {
+                "title": "End Session…",
+                "command": "tmux.killSession"
+            }
+        ]
+    },
+
+    "config": [
+        {
+            "key": "tmux.terminal",
+            "title": "External Terminal",
+            "description": "The terminal app used by Open in External Terminal.",
+            "type": "enum",
+            "values": [
+                ["ghostty", "Ghostty"],
+                ["iterm", "iTerm"],
+                ["kitty", "kitty"],
+                ["terminal", "Terminal"]
+            ],
+            "radio": false,
+            "default": "ghostty"
+        },
+        {
+            "key": "tmux.path",
+            "title": "tmux Path",
+            "description": "Leave empty to find tmux in /opt/homebrew/bin, /usr/local/bin, /opt/local/bin or /usr/bin.",
+            "type": "path",
+            "placeholder": "/opt/homebrew/bin/tmux"
+        }
+    ]
+}

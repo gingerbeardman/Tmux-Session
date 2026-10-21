@@ -8,7 +8,7 @@
     "name": "Tmux Session",
     "organization": "gingerbeardman",
     "repository": "https://github.com/gingerbeardman/Tmux-Session",
-    "version": "1.0.0",
+    "version": "2.0.0",
 
     "categories": ["commands"],
 
@@ -41,6 +41,17 @@
             {
                 "title": "End Session…",
                 "command": "tmux.killSession"
+            },
+            {
+                "separator": true
+            },
+            {
+                "title": "Copy Recommended tmux Settings",
+                "command": "tmux.copyConfig"
+            },
+            {
+                "title": "Copy launchd Agent",
+                "command": "tmux.copyLaunchAgent"
             }
         ]
     },

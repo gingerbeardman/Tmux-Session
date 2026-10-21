@@ -68,18 +68,13 @@ function showError(message, detail) {
   );
 }
 
-// A project's session is found by the folder path stored in this tmux user
-// option rather than by its name, so it can be renamed freely, here or with
-// tmux's own prefix-$, without losing track of it.
-var PATH_OPTION = "@nova_path";
-
 // tmux silently turns "." and ":" into "_", so do the same up front to keep
-// the names we look up matching the names tmux actually creates.
+// the names we use matching the names tmux actually creates.
 function cleanName(name) {
   return name.replace(/[.:]/g, "_");
 }
 
-// The name a project's session gets when it is first created.
+// The name for a new session made from this extension.
 function defaultSessionName() {
   return cleanName(nova.path.basename(nova.workspace.path));
 }
@@ -98,7 +93,8 @@ function tmuxPath() {
 }
 
 // The command typed into a shell; bare "tmux" relies on the user's own PATH
-// unless they have pointed the extension at a specific binary.
+// unless they have pointed the extension at a specific binary. "new -A"
+// joins the session if it exists and creates it in the project folder if not.
 function attachCommand(name) {
   var path = nova.config.get("tmux.path", "string");
   var command = (path ? shellQuote(path) : "tmux") + " new -A -s " + shellQuote(name);
@@ -145,77 +141,54 @@ function runTmux(args) {
   return run(tmux, args);
 }
 
-// Grouped sessions (one per Nova terminal tab, see README) share their
-// windows with the session they were made from, so they are folded into it.
-// tmux keeps a group's original name after a rename, so each entry is named
-// after its main session (the one tagged with a project path) instead.
+// With tmux as Nova's terminal shell, each tab is its own session, started
+// in the project folder. A session belongs to a project by that start folder.
 function listSessions() {
-  var format =
-    "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_group}\t#{" +
-    PATH_OPTION + "}";
+  var format = "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_path}";
   return runTmux(["list-sessions", "-F", format]).then(function (result) {
     // A non-zero exit here just means no tmux server is running yet.
     if (!result || result.status != 0) {
       return [];
     }
-    var sessions = [];
-    var byName = {};
-    result.stdout
+    return result.stdout
       .split("\n")
       .filter(function (line) {
         return line.length > 0;
       })
-      .forEach(function (line) {
+      .map(function (line) {
         var fields = line.split("\t");
-        var key = fields[3] || fields[0];
-        var session = byName[key];
-        if (!session) {
-          session = byName[key] = {
-            name: fields[0],
-            path: "",
-            windows: parseInt(fields[1], 10),
-            attached: 0,
-            members: [],
-          };
-          sessions.push(session);
-        }
-        if (fields[4]) {
-          session.name = fields[0];
-          session.path = fields[4];
-        } else if (!session.path && fields[0] === key) {
-          session.name = fields[0];
-        }
-        session.attached += parseInt(fields[2], 10);
-        session.members.push(fields[0]);
+        return {
+          name: fields[0],
+          windows: parseInt(fields[1], 10),
+          attached: parseInt(fields[2], 10),
+          path: fields[3],
+        };
       });
-    return sessions;
   });
 }
 
-// The running session for this project, or null. A session that still has
-// the project's default name but no path (made by a pasted join command, say)
-// is adopted by tagging it, which is what the README's zsh snippet does too.
-function findProjectSession() {
+function projectSessions() {
   return listSessions().then(function (sessions) {
-    var adopt = null;
-    for (var i = 0; i < sessions.length; i++) {
-      if (sessions[i].path === nova.workspace.path) {
-        return sessions[i];
-      }
-      if (!sessions[i].path && sessions[i].name === defaultSessionName()) {
-        adopt = sessions[i];
-      }
-    }
-    if (!adopt) {
-      return null;
-    }
-    return runTmux(["set", "-t", "=" + adopt.name + ":", PATH_OPTION, nova.workspace.path]).then(
-      function () {
-        adopt.path = nova.workspace.path;
-        return adopt;
-      }
-    );
+    return sessions.filter(function (session) {
+      return session.path === nova.workspace.path;
+    });
   });
+}
+
+function sessionLabel(session) {
+  var label = session.name;
+  label += " — " + session.windows + " ";
+  label += session.windows == 1 ? nova.localize("window") : nova.localize("windows");
+  if (session.attached > 0) {
+    label += ", " + nova.localize("open in") + " " + session.attached + " ";
+    label += session.attached == 1 ? nova.localize("terminal") : nova.localize("terminals");
+  }
+  if (session.path) {
+    label += " " + (session.path === nova.workspace.path
+      ? nova.localize("(this project)")
+      : "(" + nova.path.basename(session.path) + ")");
+  }
+  return label;
 }
 
 function openExternal(name) {
@@ -253,7 +226,7 @@ function openExternal(name) {
 function copyAttachCommand(name) {
   nova.clipboard.writeText(attachCommand(name)).then(function () {
     nova.workspace.showInformativeMessage(
-      nova.localize("Copied. Paste it into a Nova terminal to join the session") +
+      nova.localize("Copied. Paste it into a terminal to join the session") +
         " “" + name + "”."
     );
   });
@@ -268,30 +241,10 @@ function renameSession(name) {
       if (!newName || newName === name) {
         return;
       }
-      listSessions().then(function (sessions) {
-        var members = [name];
-        sessions.forEach(function (session) {
-          if (session.name === name) {
-            members = session.members;
-          }
-        });
-        // Per-tab sessions are named "<session>-<pid>"; keep them matching.
-        members.forEach(function (member) {
-          var target = member;
-          if (member === name) {
-            target = newName;
-          } else if (member.indexOf(name + "-") === 0) {
-            target = newName + member.slice(name.length);
-          }
-          if (target === member) {
-            return;
-          }
-          runTmux(["rename-session", "-t", "=" + member, target]).then(function (result) {
-            if (result && result.status != 0) {
-              showError("Error renaming session:", result.stderr);
-            }
-          });
-        });
+      runTmux(["rename-session", "-t", "=" + name, newName]).then(function (result) {
+        if (result && result.status != 0) {
+          showError("Error renaming session:", result.stderr);
+        }
       });
     }
   );
@@ -308,20 +261,10 @@ function killSession(name) {
       if (index !== 0) {
         return;
       }
-      listSessions().then(function (sessions) {
-        var members = [name];
-        sessions.forEach(function (session) {
-          if (session.name === name) {
-            members = session.members;
-          }
-        });
-        members.forEach(function (member) {
-          runTmux(["kill-session", "-t", "=" + member]).then(function (result) {
-            if (result && result.status != 0) {
-              showError("Error ending session:", result.stderr);
-            }
-          });
-        });
+      runTmux(["kill-session", "-t", "=" + name]).then(function (result) {
+        if (result && result.status != 0) {
+          showError("Error ending session:", result.stderr);
+        }
       });
     }
   );
@@ -336,19 +279,7 @@ function showSessions() {
       return;
     }
 
-    var choices = sessions.map(function (session) {
-      var label = session.name;
-      label += " — " + session.windows + " ";
-      label += session.windows == 1 ? nova.localize("window") : nova.localize("windows");
-      if (session.attached > 0) {
-        label += ", " + nova.localize("open in") + " " + session.attached + " ";
-        label += session.attached == 1 ? nova.localize("terminal") : nova.localize("terminals");
-      }
-      if (session.path && session.path === nova.workspace.path) {
-        label += " " + nova.localize("(this project)");
-      }
-      return label;
-    });
+    var choices = sessions.map(sessionLabel);
 
     nova.workspace.showChoicePalette(
       choices,
@@ -384,41 +315,115 @@ function chooseSessionAction(name) {
   );
 }
 
-// Runs callback with the name of this project's session, or the name it
-// will get when it is created.
-function withSessionName(callback) {
+// Runs callback with one of this project's sessions, asking which when there
+// are several. With none, it runs with a new session's name if allowNew is
+// set, and otherwise says so.
+function withProjectSession(allowNew, callback) {
   if (!nova.workspace.path) {
-    showError("This workspace has no folder, so it has no tmux session.");
+    showError("This workspace has no folder, so it has no tmux sessions.");
     return;
   }
-  findProjectSession().then(function (session) {
-    callback(session ? session.name : defaultSessionName());
-  });
-}
-
-// For commands that need the session to exist already.
-function withRunningSession(callback) {
-  if (!nova.workspace.path) {
-    showError("This workspace has no folder, so it has no tmux session.");
-    return;
-  }
-  findProjectSession().then(function (session) {
-    if (session) {
-      callback(session.name);
+  projectSessions().then(function (sessions) {
+    if (sessions.length === 1) {
+      callback(sessions[0].name);
+    } else if (sessions.length > 1) {
+      nova.workspace.showChoicePalette(
+        sessions.map(sessionLabel),
+        { placeholder: nova.localize("Choose a tmux session") },
+        function (choice, index) {
+          if (choice !== null) {
+            callback(sessions[index].name);
+          }
+        }
+      );
+    } else if (allowNew) {
+      callback(defaultSessionName());
     } else {
       nova.workspace.showInformativeMessage(
-        nova.localize("This project's tmux session isn't running.")
+        nova.localize("This project has no tmux sessions running.")
       );
     }
   });
 }
 
+// Settings that make tmux behave more like Nova's own terminal. Keep in step
+// with the README's "Recommended tmux settings".
+var RECOMMENDED_CONFIG = [
+  "# More scrollback",
+  "set -g history-limit 50000",
+  "",
+  "# Mouse control: drag to select, copied to the macOS clipboard on release",
+  "set -g mouse on",
+  "bind -T copy-mode    MouseDragEnd1Pane send -X copy-pipe-and-cancel",
+  "bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel",
+  "# A plain click in copy mode clears the selection rather than starting one",
+  "bind -T copy-mode    MouseDown1Pane select-pane \\; send -X clear-selection",
+  "bind -T copy-mode-vi MouseDown1Pane select-pane \\; send -X clear-selection",
+  "",
+  "# Clicking away from Nova mid-drag can leave tmux extending a selection with",
+  "# every later mouse move. Clear it whenever the terminal loses or gains focus.",
+  "set -g focus-events on",
+  "set-hook -g client-focus-out 'if -F \"#{pane_in_mode}\" \"send -X clear-selection\"'",
+  "set-hook -g client-focus-in  'if -F \"#{pane_in_mode}\" \"send -X clear-selection\"'",
+  "",
+  "# Send tmux copies to the macOS clipboard (tmux 3.2+)",
+  "set -s copy-command 'pbcopy'",
+  "set -g set-clipboard on",
+  "set -as terminal-features ',*:clipboard'",
+  "",
+  "# PageUp from a prompt scrolls back; scrolling to the bottom returns to the prompt",
+  "bind -n PageUp copy-mode -eu",
+].join("\n") + "\n";
+
+// A launchd agent that runs the tmux server outside Nova, so sessions survive
+// Nova quitting or crashing. Keep in step with the README.
+function launchAgent() {
+  var lang = nova.environment.LANG || "en_US.UTF-8";
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    "<dict>",
+    "    <key>Label</key>",
+    "    <string>local.tmux</string>",
+    "    <key>ProgramArguments</key>",
+    "    <array>",
+    "        <string>" + xmlEscape(tmuxPath() || "/opt/homebrew/bin/tmux") + "</string>",
+    "        <string>-D</string>",
+    "    </array>",
+    "    <key>EnvironmentVariables</key>",
+    "    <dict>",
+    "        <key>PATH</key>",
+    "        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
+    "        <key>LANG</key>",
+    "        <string>" + xmlEscape(lang) + "</string>",
+    "    </dict>",
+    "    <key>RunAtLoad</key>",
+    "    <true/>",
+    "    <key>KeepAlive</key>",
+    "    <true/>",
+    "</dict>",
+    "</plist>",
+    "",
+  ].join("\n");
+}
+
+function xmlEscape(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function copySnippet(text, message) {
+  nova.clipboard.writeText(text).then(function () {
+    nova.workspace.showInformativeMessage(nova.localize(message));
+  });
+}
+
 nova.commands.register("tmux.openExternal", function () {
-  withSessionName(openExternal);
+  withProjectSession(true, openExternal);
 });
 
 nova.commands.register("tmux.copyAttachCommand", function () {
-  withSessionName(copyAttachCommand);
+  withProjectSession(true, copyAttachCommand);
 });
 
 nova.commands.register("tmux.sessions", function () {
@@ -426,9 +431,23 @@ nova.commands.register("tmux.sessions", function () {
 });
 
 nova.commands.register("tmux.renameSession", function () {
-  withRunningSession(renameSession);
+  withProjectSession(false, renameSession);
 });
 
 nova.commands.register("tmux.killSession", function () {
-  withRunningSession(killSession);
+  withProjectSession(false, killSession);
+});
+
+nova.commands.register("tmux.copyConfig", function () {
+  copySnippet(
+    RECOMMENDED_CONFIG,
+    "Copied. Add it to ~/.tmux.conf, then run tmux source-file ~/.tmux.conf or open a new tab."
+  );
+});
+
+nova.commands.register("tmux.copyLaunchAgent", function () {
+  copySnippet(
+    launchAgent(),
+    "Copied. Save it as ~/Library/LaunchAgents/local.tmux.plist, then run launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.tmux.plist"
+  );
 });
